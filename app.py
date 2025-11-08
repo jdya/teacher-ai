@@ -197,6 +197,30 @@ def save_to_supabase(content: str, embedding: list[float], file_name: str):
     return res
 
 
+# 파일 목록 가져오기 (최신순)
+def fetch_uploaded_files() -> list[dict]:
+    """class_materials 테이블에서 file_name과 created_at만 최신순으로 조회."""
+    if not supabase:
+        raise RuntimeError("Supabase 클라이언트가 초기화되지 않았습니다.")
+    try:
+        res = (
+            supabase
+            .table("class_materials")
+            .select("file_name, created_at")
+            .order("created_at", desc=True)
+            .execute()
+        )
+    except Exception as e:
+        raise RuntimeError(f"파일 목록 조회 실패: {e}")
+
+    data = getattr(res, "data", None)
+    if data is None and isinstance(res, dict):
+        data = res.get("data")
+    if not data:
+        return []
+    return data
+
+
 # 사이드바: PDF 업로드(임시)
 with st.sidebar:
     # 설정 상태 표시: 키/클라이언트 초기화 여부
@@ -229,8 +253,21 @@ with st.sidebar:
                 save_to_supabase(text, embedding, uploaded_pdf.name)
                 # (3) 성공 메시지 표시
                 st.success(f"{uploaded_pdf.name} 저장 완료!")
+                # 저장 성공 후 즉시 새로고침하여 목록에 반영
+                st.rerun()
             except Exception as e:
                 st.error(f"업로드/저장 실패: {e}")
+
+    # 학습된 파일 목록 표시
+    st.sidebar.subheader("학습된 파일 목록")
+    try:
+        files = fetch_uploaded_files()
+        if files:
+            st.sidebar.dataframe(files, use_container_width=True, height=240)
+        else:
+            st.sidebar.caption("아직 저장된 파일이 없습니다.")
+    except Exception as e:
+        st.sidebar.warning(f"파일 목록을 불러오지 못했습니다: {e}")
 
 # RAG 모드 스위치
 rag_mode = st.toggle("🤖 '우리 반 맞춤형' RAG 모드 켜기")
