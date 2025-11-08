@@ -221,6 +221,46 @@ def fetch_uploaded_files() -> list[dict]:
     return data
 
 
+# RAG: 유사 문서 검색
+def find_similar_docs(query_text: str, match_threshold: float = 0.7, match_count: int = 3) -> list[str]:
+    """질문 텍스트를 임베딩으로 변환하고 Supabase RPC(match_class_materials)로 유사 자료 검색.
+
+    반환: 텍스트(content) 조각들의 리스트
+    """
+    if not supabase:
+        raise RuntimeError("Supabase 클라이언트가 초기화되지 않았습니다.")
+    if deepseek_client is None:
+        raise RuntimeError("DeepSeek 클라이언트가 초기화되지 않았습니다.")
+
+    # 1) 질문 임베딩 생성
+    query_vec = get_embedding(query_text, deepseek_client)
+
+    # 2) Supabase RPC 호출
+    params = {
+        "query_embedding": query_vec,
+        "match_threshold": match_threshold,
+        "match_count": match_count,
+    }
+    try:
+        res = supabase.rpc("match_class_materials", params).execute()
+    except Exception as e:
+        raise RuntimeError(f"RAG 검색(match_class_materials) 호출 실패: {e}")
+
+    rows = getattr(res, "data", None)
+    if rows is None and isinstance(res, dict):
+        rows = res.get("data")
+    if not rows:
+        return []
+
+    # 3) content 필드만 추출
+    docs: list[str] = []
+    for r in rows:
+        c = r.get("content") if isinstance(r, dict) else None
+        if isinstance(c, str) and c.strip():
+            docs.append(c.strip())
+    return docs
+
+
 # 사이드바: PDF 업로드(임시)
 with st.sidebar:
     # 설정 상태 표시: 키/클라이언트 초기화 여부
@@ -293,12 +333,39 @@ if prompt:
     with st.chat_message("assistant"):
         try:
             if rag_mode:
-                # 임시 RAG 모드 응답
-                def _rag_demo_stream():
-                    text = "RAG 모드입니다. (아직 개발 중)"
-                    for ch in text:
-                        yield ch
-                full_text = st.write_stream(_rag_demo_stream())
+                # 실제 RAG 모드: 참고 자료 검색 → 새 프롬프트 구성 → 스트리밍
+                st.info("RAG 모드로 검색 중...")
+
+                try:
+                    similar_docs = find_similar_docs(prompt)
+                except Exception as e:
+                    st.warning(f"RAG 검색 실패: {e}")
+                    similar_docs = []
+
+                context_text = "\n\n".join(similar_docs)
+                if similar_docs:
+                    new_prompt = (
+                        "다음 자료를 참고해서 답해줘.\n\n"
+                        f"[참고 자료]\n{context_text}\n\n"
+                        f"[사용자 질문]\n{prompt}"
+                    )
+                else:
+                    # 참고 자료가 없을 때는 반드시 못 답한다는 문장을 포함하도록 지시
+                    new_prompt = (
+                        "참고 자료가 없습니다. 반드시 다음 문장으로 답하세요: "
+                        "'제가 가진 정보로는 답변할 수 없습니다'.\n"
+                        f"사용자 질문: {prompt}"
+                    )
+
+                api_key = st.secrets.get("DEEPSEEK_API_KEY")
+                if api_key:
+                    # 기존 대화 히스토리에 새 프롬프트를 덧붙여 호출
+                    rag_messages = st.session_state.messages + [{"role": "user", "content": new_prompt}]
+                    stream = _deepseek_stream(rag_messages, api_key)
+                else:
+                    st.info("DEEPSEEK_API_KEY가 설정되지 않아 데모 응답으로 표시합니다.")
+                    stream = _fallback_stream(new_prompt)
+                full_text = st.write_stream(stream)
             else:
                 # 일반 모드: DeepSeek API 스트리밍
                 if api_key:
